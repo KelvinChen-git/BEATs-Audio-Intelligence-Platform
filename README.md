@@ -32,6 +32,16 @@ It includes:
 6. Then ask Codex to finish the BEATs integration using the prompt in:
    - `prompts/codex_task_beats_integration.md`
 
+## Codex Cloud setup
+
+This repository can be opened from GitHub in Codex Cloud. In a fresh cloud environment, run:
+
+```bash
+python scripts/setup_cloud_env.py --install --clone-beats --run-tests
+```
+
+See `docs/CODEX_CLOUD_RUN.md` for the full cloud setup and training notes. Large assets such as ESC-50 audio and BEATs checkpoints are intentionally not committed to GitHub.
+
 ## Example commands
 
 ### Baseline sanity check
