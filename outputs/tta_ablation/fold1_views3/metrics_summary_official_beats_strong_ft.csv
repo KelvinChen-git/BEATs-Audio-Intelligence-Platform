@@ -1,0 +1,2 @@
+model,fold,best_epoch,protocol,use_trainval_for_final,train_size,val_size,test_size,epochs,tta_enabled,tta_num_views,val_acc,val_mAUC,test_acc,test_mAUC,checkpoint,output_dir
+official_beats_strong_ft,1,eval_only,esc50_standard_cv,True,1600,0,400,17,True,3,nan,nan,0.955,0.9988265306122449,outputs\replication_standard_cv\full_lr3e6_fold1\final_official_beats_strong_ft_fold_1.pt,outputs\tta_ablation\fold1_views3

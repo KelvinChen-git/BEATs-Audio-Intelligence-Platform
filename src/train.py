@@ -19,6 +19,7 @@ from src.dataset import (
     ESC50ManifestDataset,
     load_esc50_metadata_items,
     split_esc50_standard_cv,
+    split_esc50_trainval_final,
 )
 from src.model_baseline import MelTransformerESC50
 from src.utils import ensure_dir, save_json, set_seed
@@ -54,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fold", type=int, default=0, help="0 means run all 5 folds; otherwise run only 1..5")
+    parser.add_argument("--use-trainval-for-final", action="store_true")
     parser.add_argument("--freeze-backbone", action="store_true")
     parser.add_argument("--time-mask-width", type=int, default=40)
     parser.add_argument("--freq-mask-width", type=int, default=16)
@@ -69,6 +71,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler", type=str, default="none", choices=["none", "cosine"])
     parser.add_argument("--amp", action="store_true", help="Use mixed precision on CUDA.")
     parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--tta", action="store_true", help="Use deterministic multi-view evaluation.")
+    parser.add_argument("--tta-num-views", type=int, default=5)
+    parser.add_argument("--tta-shift-samples", type=int, default=1600)
+    parser.add_argument("--eval-only-checkpoint", type=str, default="")
     parser.add_argument("--device", type=str, default=get_default_device())
     args = parser.parse_args()
     apply_model_defaults(args, parser)
@@ -77,8 +83,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_runtime_args(args: argparse.Namespace) -> None:
+    if args.use_trainval_for_final and args.protocol != "esc50_standard_cv":
+        raise ValueError("--use-trainval-for-final is only valid with --protocol esc50_standard_cv.")
     if args.grad_accum_steps < 1:
         raise ValueError("--grad-accum-steps must be >= 1.")
+    if args.tta_num_views < 1:
+        raise ValueError("--tta-num-views must be >= 1.")
+    if args.tta_shift_samples < 0:
+        raise ValueError("--tta-shift-samples must be >= 0.")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise ValueError("CUDA was requested with --device, but torch.cuda.is_available() is False.")
 
@@ -182,7 +194,7 @@ def build_loaders(
     fold: int,
     esc_root: Path,
     pin_memory: bool,
-) -> tuple[DataLoader, DataLoader, DataLoader]:
+) -> tuple[DataLoader, DataLoader | None, DataLoader]:
     if args.protocol == "json_split":
         json_dir = Path(args.json_dir)
         fold_files = get_fold_files(json_dir, fold)
@@ -202,6 +214,14 @@ def build_loaders(
         )
 
     meta_items = load_esc50_metadata_items(esc_root / "meta" / "esc50.csv")
+    if args.use_trainval_for_final:
+        splits = split_esc50_trainval_final(meta_items=meta_items, fold=fold)
+        return (
+            build_file_loader(splits["train"], esc_root, args.batch_size, args.num_workers, True, pin_memory),
+            None,
+            build_file_loader(splits["test"], esc_root, args.batch_size, args.num_workers, False, pin_memory),
+        )
+
     splits = split_esc50_standard_cv(meta_items=meta_items, fold=fold, seed=args.seed)
     return (
         build_file_loader(splits["train"], esc_root, args.batch_size, args.num_workers, True, pin_memory),
@@ -210,8 +230,28 @@ def build_loaders(
     )
 
 
+def make_tta_views(waveforms: torch.Tensor, num_views: int, shift_samples: int) -> list[torch.Tensor]:
+    if num_views <= 1:
+        return [waveforms]
+    if shift_samples <= 0:
+        return [waveforms for _ in range(num_views)]
+
+    if num_views == 2:
+        offsets = [-shift_samples, shift_samples]
+    else:
+        offsets = torch.linspace(-shift_samples, shift_samples, steps=num_views).round().to(torch.int64).tolist()
+    return [torch.roll(waveforms, shifts=int(offset), dims=-1) for offset in offsets]
+
+
 @torch.no_grad()
-def evaluate(model: nn.Module, loader: DataLoader, device: str) -> Dict[str, float]:
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: str,
+    tta: bool = False,
+    tta_num_views: int = 5,
+    tta_shift_samples: int = 1600,
+) -> Dict[str, float]:
     model.eval()
     all_targets: List[int] = []
     all_preds: List[int] = []
@@ -220,8 +260,12 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> Dict[str, flo
     for waveforms, labels, _ in loader:
         waveforms = waveforms.to(device)
         labels = labels.to(device)
-        logits = model(waveforms)
-        probs = torch.softmax(logits, dim=-1)
+        if tta:
+            view_probs = [torch.softmax(model(view), dim=-1) for view in make_tta_views(waveforms, tta_num_views, tta_shift_samples)]
+            probs = torch.stack(view_probs, dim=0).mean(dim=0)
+        else:
+            logits = model(waveforms)
+            probs = torch.softmax(logits, dim=-1)
         preds = probs.argmax(dim=-1)
 
         all_targets.extend(labels.cpu().tolist())
@@ -350,9 +394,43 @@ def log_training_start(
                 f"frozen_parameters={frozen_params:,}",
                 f"amp={'enabled' if args.amp and device.startswith('cuda') else 'disabled'}",
                 f"grad_accum_steps={args.grad_accum_steps}",
+                f"use_trainval_for_final={args.use_trainval_for_final}",
+                f"tta={'enabled' if args.tta else 'disabled'}",
             ]
         )
     )
+
+
+def load_eval_checkpoint(model: nn.Module, checkpoint_path: str, device: str) -> None:
+    path = Path(checkpoint_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Evaluation checkpoint not found: {path}")
+    state = torch.load(path, map_location=device)
+    if not isinstance(state, dict):
+        raise ValueError(f"Unexpected evaluation checkpoint object in {path}: expected a state dict.")
+    model.load_state_dict(state)
+
+
+def result_metadata(
+    args: argparse.Namespace,
+    fold: int,
+    train_loader: DataLoader,
+    val_loader: DataLoader | None,
+    test_loader: DataLoader,
+) -> dict[str, object]:
+    return {
+        "model": args.model,
+        "fold": fold,
+        "protocol": args.protocol,
+        "use_trainval_for_final": bool(args.use_trainval_for_final),
+        "train_size": len(train_loader.dataset),
+        "val_size": 0 if val_loader is None else len(val_loader.dataset),
+        "test_size": len(test_loader.dataset),
+        "epochs": args.epochs,
+        "tta_enabled": bool(args.tta),
+        "tta_num_views": args.tta_num_views if args.tta else 1,
+        "output_dir": str(Path(args.output_dir)),
+    }
 
 
 def train_one_fold(args: argparse.Namespace, fold: int) -> Dict[str, float]:
@@ -368,6 +446,29 @@ def train_one_fold(args: argparse.Namespace, fold: int) -> Dict[str, float]:
     model = build_model(args).to(device)
     trainable_params, frozen_params = count_parameters(model)
     log_training_start(args, fold, device, trainable_params, frozen_params)
+
+    if args.eval_only_checkpoint:
+        load_eval_checkpoint(model, args.eval_only_checkpoint, device)
+        test_metrics = evaluate(
+            model,
+            test_loader,
+            device,
+            tta=args.tta,
+            tta_num_views=args.tta_num_views,
+            tta_shift_samples=args.tta_shift_samples,
+        )
+        result = {
+            **result_metadata(args, fold, train_loader, val_loader, test_loader),
+            "best_epoch": "eval_only",
+            "val_acc": float("nan"),
+            "val_mAUC": float("nan"),
+            "test_acc": test_metrics["acc"],
+            "test_mAUC": test_metrics["mAUC"],
+            "checkpoint": str(Path(args.eval_only_checkpoint)),
+        }
+        save_json(result, out_dir / f"metrics_{args.model}_fold_{fold}.json")
+        return result
+
     optimizer = build_optimizer(args, model)
     steps_per_epoch = math.ceil(len(train_loader) / args.grad_accum_steps)
     scheduler = build_scheduler(args, optimizer, total_steps=args.epochs * steps_per_epoch)
@@ -423,37 +524,52 @@ def train_one_fold(args: argparse.Namespace, fold: int) -> Dict[str, float]:
 
         train_loss = running_loss / max(total, 1)
         train_acc = correct / max(total, 1)
-        val_metrics = evaluate(model, val_loader, device)
+        if val_loader is None:
+            print(f"[Fold {fold}] Epoch {epoch:02d} | train_loss={train_loss:.4f} | train_acc={train_acc:.4f}")
+        else:
+            val_metrics = evaluate(model, val_loader, device)
+            print(
+                f"[Fold {fold}] Epoch {epoch:02d} | train_loss={train_loss:.4f} | train_acc={train_acc:.4f} | "
+                f"val_acc={val_metrics['acc']:.4f} | val_mAUC={val_metrics['mAUC']:.4f}"
+            )
 
-        print(
-            f"[Fold {fold}] Epoch {epoch:02d} | train_loss={train_loss:.4f} | train_acc={train_acc:.4f} | "
-            f"val_acc={val_metrics['acc']:.4f} | val_mAUC={val_metrics['mAUC']:.4f}"
-        )
+            if val_metrics["acc"] > best_val_acc:
+                best_val_acc = val_metrics["acc"]
+                best_epoch = epoch
+                best_state = {k: v.cpu() for k, v in model.state_dict().items()}
 
-        if val_metrics["acc"] > best_val_acc:
-            best_val_acc = val_metrics["acc"]
-            best_epoch = epoch
-            best_state = {k: v.cpu() for k, v in model.state_dict().items()}
-
-    if best_state is None:
+    if val_loader is None:
+        best_epoch = args.epochs
+        best_state = {k: v.cpu() for k, v in model.state_dict().items()}
+        best_model_path = out_dir / f"final_{args.model}_fold_{fold}.pt"
+    elif best_state is None:
         raise RuntimeError("Training did not produce a best checkpoint.")
+    else:
+        best_model_path = out_dir / f"best_{args.model}_fold_{fold}.pt"
 
-    best_model_path = out_dir / f"best_{args.model}_fold_{fold}.pt"
     torch.save(best_state, best_model_path)
     model.load_state_dict(best_state)
 
-    val_metrics = evaluate(model, val_loader, device)
-    test_metrics = evaluate(model, test_loader, device)
+    if val_loader is None:
+        val_metrics = {"acc": float("nan"), "mAUC": float("nan")}
+    else:
+        val_metrics = evaluate(model, val_loader, device)
+    test_metrics = evaluate(
+        model,
+        test_loader,
+        device,
+        tta=args.tta,
+        tta_num_views=args.tta_num_views,
+        tta_shift_samples=args.tta_shift_samples,
+    )
     result = {
-        "model": args.model,
-        "fold": fold,
+        **result_metadata(args, fold, train_loader, val_loader, test_loader),
         "best_epoch": best_epoch,
         "val_acc": val_metrics["acc"],
         "val_mAUC": val_metrics["mAUC"],
         "test_acc": test_metrics["acc"],
         "test_mAUC": test_metrics["mAUC"],
         "checkpoint": str(best_model_path),
-        "protocol": args.protocol,
     }
     save_json(result, out_dir / f"metrics_{args.model}_fold_{fold}.json")
     return result
@@ -494,12 +610,20 @@ def write_summary(summary_path: Path, all_results: List[Dict[str, float]]) -> No
                 "model",
                 "fold",
                 "best_epoch",
+                "protocol",
+                "use_trainval_for_final",
+                "train_size",
+                "val_size",
+                "test_size",
+                "epochs",
+                "tta_enabled",
+                "tta_num_views",
                 "val_acc",
                 "val_mAUC",
                 "test_acc",
                 "test_mAUC",
                 "checkpoint",
-                "protocol",
+                "output_dir",
             ],
         )
         writer.writeheader()

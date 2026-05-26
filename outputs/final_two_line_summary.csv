@@ -1,0 +1,3 @@
+line_type,setting_name,protocol,fold,train_size,val_size,test_size,epochs,tta_enabled,tta_num_views,test_acc,test_mAUC,checkpoint,output_dir,note
+replication,Reproduced BEATs,esc50_standard_cv,1,1600,0,400,17,False,1,0.9475,0.9987117346938775,outputs\replication_standard_cv\full_lr3e6_fold1\final_official_beats_strong_ft_fold_1.pt,outputs\tta_ablation\fold1_views1,Single-view evaluation of reproduced BEATs full fine-tuning.
+improvement,Improved BEATs + TTA-3,esc50_standard_cv,1,1600,0,400,17,True,3,0.955,0.9988265306122449,outputs\replication_standard_cv\full_lr3e6_fold1\final_official_beats_strong_ft_fold_1.pt,outputs\tta_ablation\fold1_views3,Selected TTA-3 from view-count ablation for best accuracy/mAUC trade-off.

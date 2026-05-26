@@ -1,0 +1,6 @@
+setting,tta_num_views,test_acc,test_mAUC,checkpoint,output_dir
+fold1_views1,1,0.9475,0.9987117346938775,outputs\replication_standard_cv\full_lr3e6_fold1\final_official_beats_strong_ft_fold_1.pt,outputs\tta_ablation\fold1_views1
+fold1_views3,3,0.955,0.9988265306122449,outputs\replication_standard_cv\full_lr3e6_fold1\final_official_beats_strong_ft_fold_1.pt,outputs\tta_ablation\fold1_views3
+fold1_views5,5,0.9525,0.9988137755102039,outputs\replication_standard_cv\full_lr3e6_fold1\final_official_beats_strong_ft_fold_1.pt,outputs\tta_ablation\fold1_views5
+fold1_views7,7,0.9525,0.9988201530612244,outputs\replication_standard_cv\full_lr3e6_fold1\final_official_beats_strong_ft_fold_1.pt,outputs\tta_ablation\fold1_views7
+fold1_views9,9,0.955,0.9988137755102042,outputs\replication_standard_cv\full_lr3e6_fold1\final_official_beats_strong_ft_fold_1.pt,outputs\tta_ablation\fold1_views9

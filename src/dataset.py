@@ -243,3 +243,18 @@ def split_esc50_standard_cv(
                 train_items.append(item)
 
     return {"train": train_items, "val": val_items, "test": test_items}
+
+
+def split_esc50_trainval_final(
+    meta_items: Sequence[dict[str, int | str]],
+    fold: int,
+) -> dict[str, list[Tuple[str, int]]]:
+    test_items = [
+        (str(item["filename"]), int(item["target"])) for item in meta_items if int(item["fold"]) == fold
+    ]
+    train_items = [
+        (str(item["filename"]), int(item["target"])) for item in meta_items if int(item["fold"]) != fold
+    ]
+    if not test_items or not train_items:
+        raise ValueError(f"Could not build ESC-50 final trainval split for fold {fold}.")
+    return {"train": train_items, "val": [], "test": test_items}

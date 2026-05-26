@@ -1,0 +1,19 @@
+{
+  "model": "official_beats_strong_ft",
+  "fold": 1,
+  "protocol": "esc50_standard_cv",
+  "use_trainval_for_final": true,
+  "train_size": 1600,
+  "val_size": 0,
+  "test_size": 400,
+  "epochs": 17,
+  "tta_enabled": true,
+  "tta_num_views": 3,
+  "output_dir": "outputs\\tta_ablation\\fold1_views3",
+  "best_epoch": "eval_only",
+  "val_acc": NaN,
+  "val_mAUC": NaN,
+  "test_acc": 0.955,
+  "test_mAUC": 0.9988265306122449,
+  "checkpoint": "outputs\\replication_standard_cv\\full_lr3e6_fold1\\final_official_beats_strong_ft_fold_1.pt"
+}

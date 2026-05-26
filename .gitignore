@@ -4,9 +4,16 @@ __pycache__/
 .pytest_cache/
 
 outputs/
+outputs_archive/
+outputs_cleanup_manifest.csv
 checkpoints/*.pt
+checkpoints/
+data/
 data/ESC-50-master/audio/
 third_party/
+.vscode/
+*.code-workspace
+*.bak_*
 
 *.zip
 *.7z
